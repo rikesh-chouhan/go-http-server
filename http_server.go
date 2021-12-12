@@ -1,42 +1,57 @@
 package main
 
 import (
-    "bytes"
     "context"
     "encoding/json"
     "fmt"
-    "io/ioutil"
     "net/http"
     "os"
-    "time"
     "log"
     "sync"
     "sync/atomic"
+    "os/signal"
+    "strconv"
+    "strings"
+    "time"
 )
 
-var map_of_texts = sync.Map
-var map_of_hashed = sync.Map
-var map_of_stats = sync.Map
+var map_of_texts = make(map[int64]string)
+var map_of_hashed = make(map[int64]string)
+var hashAverage int64
 var shutdown bool
 var requests int64
 
 // increments the number of requests and returns the new value
-func incRequests() int64 {
+func IncRequests() int64 {
     return atomic.AddInt64(&requests, 1)
 }
 
 // returns the current value
-func getRequests() int64 {
+func GetRequests() int64 {
+    return atomic.LoadInt64(&requests)
+}
+
+// increments the number of requests and returns the new value
+func IncAverage(currentReqs int64, currentAvg int64, newValue int64) int64 {
+    return atomic.AddInt64(&hashAverage, ((currentReqs-1)*currentAvg+newValue)/currentReqs)
+}
+
+// returns the current value
+func GetAverage() int64 {
     return atomic.LoadInt64(&requests)
 }
 
 func main() {
     http.HandleFunc("/shutdown", ShutdownHandler)
     http.HandleFunc("/stats", StatsHandler)
+    http.HandleFunc("/hash", HashHandler)
+    // used for debugging only
+    http.HandleFunc("/entries", EntriesHandler)
     // Creating a waiting group that waits until the graceful shutdown procedure is done
     var wg sync.WaitGroup
     wg.Add(1)
 
+    server := &http.Server{Addr:":8080", Handler: nil}
     // This goroutine is running in parallels to the main one
     go func() {
         // creating a channel to listen for signals, like SIGINT
@@ -66,57 +81,79 @@ func main() {
     }
 }
 
-func SendPostAsync(url string, body []byte, rc chan *http.Response) error {
-    response, err := http.Post(url, "application/json", bytes.NewReader(body))
-    if err == nil {
-        rc <- response
-    }
-
-    return err
-}
-
-// Handler function that records method execution time.
-func timer(h http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        startTime := time.Now()
-        h.ServeHTTP(w, r)
-        duration := time.Now().Sub(startTime).Microseconds()
-    })
-}
-
 /*
  Stats handler returns stats for an endpoint.
  */
-func StatsHandler(w http.ResponseWriter, r *http.Request) error {
-    if shutdown {
-        ServiceStopping(w, r)
-        return
-    }
-    w.Header().Set("Content-Type", "application/json")
-    switch r.Method {
-    case "GET":
-        log.Println("Writing stats")
-        jmap, err := json.Marshal(map_of_stats)
-        if err != nil {
-            fmt.Printf("Error: %s", err.Error())
-        } else {
-            w.Write([]byte(string(jmap)))
-            fmt.Println(string(jmap))
+func StatsHandler(w http.ResponseWriter, r *http.Request) {
+    if !shutdown {
+        w.Header().Set("Content-Type", "application/json")
+        switch r.Method {
+        case "GET":
+            log.Println("Writing stats")
+            fmt.Fprintf(w, `{"total": %d "average": %d}` + "\n", GetRequests(), GetAverage())
+        default:
+            w.WriteHeader(http.StatusNotFound)
+            w.Write([]byte(`{"error": "only GET supported"}`))
         }
-
-    default:
-        w.WriteHeader(http.StatusNotFound)
-        w.Write([]byte(`{"message": "not found"}`))
     }
 }
 
 // set shutdown flag to true to stop handling new hash requests.
-func ShutdownHandler(w http.ResponseWriter, r *http.Request) error {
-    shutdown = true
-    log.Println("Shutting down")
-    ServiceStopping(w, r)
+func ShutdownHandler(w http.ResponseWriter, r *http.Request) {
+    if !shutdown {
+        shutdown = true
+        log.Println("Shutting down")
+        fmt.Fprintf(w, "Shutting down server\n")
+    }
 }
 
-func ServiceStopping(w http.ResponseWriter, r *http.Request) error {
-    fmt.Fprintf(w, "Shutting down server\n")
+// used for debugging
+func EntriesHandler(w http.ResponseWriter, r *http.Request) {
+    if !shutdown {
+        w.Header().Set("Content-Type", "application/json")
+        jmap, err := json.Marshal(map_of_texts)
+        if err == nil {
+            fmt.Fprintf(w, "%s\n", string(jmap))
+        }
+    }
 }
+
+// Process hash generation service
+func HashHandler(w http.ResponseWriter, r *http.Request)  {
+    if !shutdown {
+        reqNum := IncRequests()
+        currentAvg := GetAverage()
+        start := time.Now()
+        w.Header().Set("Content-Type", "text/plain")
+        switch r.Method {
+        case "GET":
+            numPath := r.URL.Path[1:]
+            fmt.Fprintf(w, "Number provided %s!\n", numPath)
+            if len(strings.TrimSpace(numPath)) > 0 {
+                numExtracted, err := strconv.ParseInt(numPath, 10, 64)
+                if err == nil {
+                    fmt.Fprintf(w, "%d provided\n", numExtracted)
+                }
+            }
+        case "POST":
+            if err := r.ParseForm(); err != nil {
+                fmt.Fprintf(w, "ParseForm() err: %v", err)
+                return
+            }
+
+            pwParam := r.FormValue("password")
+            if len(strings.TrimSpace(pwParam)) < 1 {
+                fmt.Fprintf(w, "Form variable password is empty\n")
+                return
+            }
+            map_of_texts[reqNum] = pwParam
+            fmt.Fprintf(w, "%d\n", reqNum)
+
+        default:
+            fmt.Fprintf(w, "Sorry, only GET and POST methods are supported.")
+        }
+        executeTime := time.Now().Sub(start).Microseconds()
+        IncAverage( reqNum, currentAvg, executeTime)
+    }
+}
+

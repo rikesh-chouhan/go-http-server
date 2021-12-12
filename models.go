@@ -3,27 +3,27 @@ package main
 import (
     "time"
     "crypto/sha512"
+    "fmt"
 )
 
-typedef Hashed struct {
-    Start Time
+type TimedData struct {
+    Start time.Time
     Count int64
-    Text, Hashed_Text string
+    Text string
 }
 
-typedef Stats struct {
+type Stats struct {
     Total, Average int64
 }
 
-func MakeHashed(count int64, text string) Hashed {
+func NewTimedData(count int64, text string) TimedData {
     return Hashed {
         Start: time.Now(),
         Count: count,
         Text: text,
-        Hashed_Text: GenerateSha512(text),
     }
 }
 
-func GenerateSha512(text string) string {
-    return sha512.Sum512([]byte (text))
+func GenerateHash(timedData *TimedData) string {
+    return fmt.Sprintf("%x", sha512.Sum512([]byte (timedData.text)))
 }
