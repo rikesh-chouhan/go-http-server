@@ -13,9 +13,10 @@ import (
     "strconv"
     "strings"
     "time"
+    model "github.com/rikesh-chouhan/go-http-server/model"
 )
 
-var map_of_texts = make(map[int64]string)
+var map_of_texts = make(map[int64]model.TimedData)
 var map_of_hashed = make(map[int64]string)
 var hashAverage int64
 var shutdown bool
@@ -79,6 +80,13 @@ func main() {
     } else if err != nil {
         log.Printf("server error: %v\n", err)
     }
+}
+
+/*
+Calculate the hash asynchronously when it has been at least 4 seconds after the request
+was made.
+*/
+func HashCalculator() {
 }
 
 /*
@@ -146,7 +154,7 @@ func HashHandler(w http.ResponseWriter, r *http.Request)  {
                 fmt.Fprintf(w, "Form variable password is empty\n")
                 return
             }
-            map_of_texts[reqNum] = pwParam
+            map_of_texts[reqNum] = model.NewTimedData(reqNum, pwParam)
             fmt.Fprintf(w, "%d\n", reqNum)
 
         default:

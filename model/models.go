@@ -1,4 +1,4 @@
-package main
+package model
 
 import (
     "time"
@@ -17,7 +17,7 @@ type Stats struct {
 }
 
 func NewTimedData(count int64, text string) TimedData {
-    return Hashed {
+    return TimedData {
         Start: time.Now(),
         Count: count,
         Text: text,
@@ -25,5 +25,5 @@ func NewTimedData(count int64, text string) TimedData {
 }
 
 func GenerateHash(timedData *TimedData) string {
-    return fmt.Sprintf("%x", sha512.Sum512([]byte (timedData.text)))
+    return fmt.Sprintf("%x", sha512.Sum512([]byte (timedData.Text)))
 }
