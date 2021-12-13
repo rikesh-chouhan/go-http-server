@@ -16,7 +16,7 @@ import (
     model "github.com/rikesh-chouhan/go-http-server/model"
 )
 
-var map_of_texts = make(map[int64]model.TimedData)
+var map_of_input = make(map[int64]model.TimedData)
 var map_of_hashed = make(map[int64]string)
 var hashAverage int64
 var shutdown bool
@@ -48,12 +48,15 @@ func main() {
     http.HandleFunc("/hash", HashHandler)
     // used for debugging only
     http.HandleFunc("/entries", EntriesHandler)
+    http.HandleFunc("/", HashRespHandler)
     // Creating a waiting group that waits until the graceful shutdown procedure is done
     var wg sync.WaitGroup
     wg.Add(1)
 
     server := &http.Server{Addr:":8080", Handler: nil}
-    // This goroutine is running in parallels to the main one
+    stopHashTicker := make(chan bool)
+
+    // Graceful shutdown - capture OS signal
     go func() {
         // creating a channel to listen for signals, like SIGINT
         stop := make(chan os.Signal, 1)
@@ -61,6 +64,7 @@ func main() {
         signal.Notify(stop, os.Interrupt)
         // this blocks until the signal is received
         <-stop
+        stopHashTicker <- true
         // initiating the shutdown
         err := server.Shutdown(context.Background())
         // can't do much here except for logging any errors
@@ -72,6 +76,9 @@ func main() {
     }()
 
     log.Println("Server started at port 8080")
+    // start the hashcalculator goroutine
+    go HashCalculator(&wg, stopHashTicker, 5)
+
     err := server.ListenAndServe()
     if err == http.ErrServerClosed { // graceful shutdown
         log.Println("commencing server shutdown...")
@@ -86,7 +93,27 @@ func main() {
 Calculate the hash asynchronously when it has been at least 4 seconds after the request
 was made.
 */
-func HashCalculator() {
+func HashCalculator(waitGroup *sync.WaitGroup, stop <-chan bool, timeToCheck float64) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+
+    func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+                for key, element := range map_of_input {
+                    if time.Since(element.Start).Seconds() >  timeToCheck {
+                        map_of_hashed[key] = model.GenerateHash(&element)
+                        delete(map_of_input, key)
+                    }
+                }
+			}
+		}
+    }()
+
+    log.Println("Outside of ticker loop")
+    ticker.Stop()
 }
 
 /*
@@ -119,12 +146,76 @@ func ShutdownHandler(w http.ResponseWriter, r *http.Request) {
 func EntriesHandler(w http.ResponseWriter, r *http.Request) {
     if !shutdown {
         w.Header().Set("Content-Type", "application/json")
-        jmap, err := json.Marshal(map_of_texts)
+        jmap, err := json.Marshal(map_of_input)
         if err == nil {
             fmt.Fprintf(w, "%s\n", string(jmap))
         }
     }
 }
+
+func HashRespHandler(w http.ResponseWriter, r *http.Request) {
+    path := r.URL.Path
+    var id int64
+
+    switch {
+    case match(path, "/hash/+", &id):
+        log.Printf("Number provided: %v\n", id)
+        if x, found := map_of_hashed[id]; found {
+            fmt.Fprintf(w, "%s\n", x)
+        } else {
+            fmt.Fprintf(w, "%d does not have a hash value\n", id)
+        }
+
+	default:
+		http.NotFound(w, r)
+		return
+	}
+}
+
+// match reports whether path matches the given pattern, which is a
+// path with '+' wildcards wherever you want to use a parameter. Path
+// parameters are assigned to the pointers in vars (len(vars) must be
+// the number of wildcards), which must be of type *string or *int.
+func match(path, pattern string, vars ...interface{}) bool {
+	for ; pattern != "" && path != ""; pattern = pattern[1:] {
+		switch pattern[0] {
+		case '+':
+			// '+' matches till next slash in path
+			slash := strings.IndexByte(path, '/')
+			if slash < 0 {
+				slash = len(path)
+			}
+			segment := path[:slash]
+			path = path[slash:]
+			switch p := vars[0].(type) {
+			case *string:
+				*p = segment
+			case *int64:
+				n, err := strconv.ParseInt(segment, 10, 64)
+				if err != nil || n < 0 {
+					return false
+				}
+				*p = n
+			case *int:
+				n, err := strconv.Atoi(segment)
+				if err != nil || n < 0 {
+					return false
+				}
+				*p = n
+			default:
+				panic("vars must be *string or *int")
+			}
+			vars = vars[1:]
+		case path[0]:
+			// non-'+' pattern byte must match path byte
+			path = path[1:]
+		default:
+			return false
+		}
+	}
+	return path == "" && pattern == ""
+}
+
 
 // Process hash generation service
 func HashHandler(w http.ResponseWriter, r *http.Request)  {
@@ -134,15 +225,6 @@ func HashHandler(w http.ResponseWriter, r *http.Request)  {
         start := time.Now()
         w.Header().Set("Content-Type", "text/plain")
         switch r.Method {
-        case "GET":
-            numPath := r.URL.Path[1:]
-            fmt.Fprintf(w, "Number provided %s!\n", numPath)
-            if len(strings.TrimSpace(numPath)) > 0 {
-                numExtracted, err := strconv.ParseInt(numPath, 10, 64)
-                if err == nil {
-                    fmt.Fprintf(w, "%d provided\n", numExtracted)
-                }
-            }
         case "POST":
             if err := r.ParseForm(); err != nil {
                 fmt.Fprintf(w, "ParseForm() err: %v", err)
@@ -154,11 +236,11 @@ func HashHandler(w http.ResponseWriter, r *http.Request)  {
                 fmt.Fprintf(w, "Form variable password is empty\n")
                 return
             }
-            map_of_texts[reqNum] = model.NewTimedData(reqNum, pwParam)
+            map_of_input[reqNum] = model.NewTimedData(reqNum, pwParam)
             fmt.Fprintf(w, "%d\n", reqNum)
 
         default:
-            fmt.Fprintf(w, "Sorry, only GET and POST methods are supported.")
+            fmt.Fprintf(w, "Sorry, only POST methods are supported.")
         }
         executeTime := time.Now().Sub(start).Microseconds()
         IncAverage( reqNum, currentAvg, executeTime)
